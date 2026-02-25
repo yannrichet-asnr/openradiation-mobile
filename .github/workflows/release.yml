@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web app
+        run: npx ng build --configuration production
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Decode keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > openradiation.keystore
+
+      - name: Build APK
+        run: |
+          cd android
+          ./gradlew assembleRelease \
+            -PversCode=${{ github.run_number }} \
+            -PversName="${{ github.ref_name }}" \
+            -Pandroid.injected.signing.store.file="${{ github.workspace }}/openradiation.keystore" \
+            -Pandroid.injected.signing.store.password="${{ secrets.OPENRADIATION_KEYSTORE_PW }}" \
+            -Pandroid.injected.signing.key.alias="openradiation" \
+            -Pandroid.injected.signing.key.password="${{ secrets.OPENRADIATION_KEYSTORE_PW }}"
+
+      - name: Rename APK
+        run: |
+          mv android/app/build/outputs/apk/release/app-release.apk \
+             android/app/build/outputs/apk/release/openradiation-${{ github.ref_name }}.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: android/app/build/outputs/apk/release/openradiation-*.apk
+
+  build-ios:
+    name: Build iOS IPA
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web app
+        run: npx ng build --configuration production
+
+      - name: Sync Capacitor
+        run: npx cap sync ios
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios/App
+          pod install
+
+      - name: Import signing certificate
+        run: |
+          echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
+          security create-keychain -p "" build.keychain
+          security import certificate.p12 -k ~/Library/Keychains/build.keychain \
+            -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-keychain-settings -lut 21600 ~/Library/Keychains/build.keychain
+          security unlock-keychain -p "" ~/Library/Keychains/build.keychain
+          security list-keychains -d user -s ~/Library/Keychains/build.keychain \
+            ~/Library/Keychains/login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" \
+            ~/Library/Keychains/build.keychain
+          rm certificate.p12
+
+      - name: Install provisioning profile
+        run: |
+          echo "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > profile.mobileprovision
+          PROFILE_UUID=$(python3 -c "
+          import plistlib, sys
+          data = open('profile.mobileprovision', 'rb').read()
+          start = data.index(b'<?xml')
+          end = data.index(b'</plist>') + 8
+          print(plistlib.loads(data[start:end]).get('UUID', ''))
+          ")
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp profile.mobileprovision \
+            ~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision
+          rm profile.mobileprovision
+
+      - name: Build iOS archive
+        run: |
+          xcodebuild -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath ${{ github.workspace }}/App.xcarchive \
+            MARKETING_VERSION="${{ github.ref_name }}" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            archive
+
+      - name: Export IPA
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath ${{ github.workspace }}/App.xcarchive \
+            -exportOptionsPlist ${{ github.workspace }}/.github/ios-export-options.plist \
+            -exportPath ${{ github.workspace }}/ios-output
+
+      - name: Rename IPA
+        run: mv ios-output/App.ipa ios-output/openradiation-${{ github.ref_name }}.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: ios-output/openradiation-*.ipa
+
+  release:
+    name: Create GitHub Release
+    needs: [build-android, build-ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: ./artifacts
+
+      - name: Download iOS IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ipa
+          path: ./artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          files: ./artifacts/*
