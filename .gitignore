@@ -34,7 +34,7 @@ documentation/
 Thumbs.db
 UserInterfaceState.xcuserstate
 
-src/environments/environment.prod.ts
+
 build.json
 openradiation.keystore
 google-services.json
