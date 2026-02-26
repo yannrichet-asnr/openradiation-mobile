@@ -12,7 +12,7 @@ on:
         default: 'dev'
 
 env:
-  VERSION_NAME: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || 'dev' }}
+  VERSION_NAME: ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.version || 'dev' }}
 
 jobs:
   build-android:
@@ -100,7 +100,7 @@ jobs:
         id: ios-signing
         run: |
           if [ -z "$CERT_B64" ] || [ -z "$PROV_B64" ]; then
-            echo "::error::iOS signing secrets (IOS_CERTIFICATE_BASE64, IOS_PROVISIONING_PROFILE_BASE64) are not configured – skipping iOS build"
+            echo "::error::iOS signing secrets (IOS_CERTIFICATE_BASE64, IOS_PROVISIONING_PROFILE_BASE64) are not configured"
             exit 1
           fi
         env:
@@ -189,7 +189,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-android, build-ios]
-    if: always() && needs.build-android.result == 'success'
+    if: ${{ !cancelled() && needs.build-android.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
