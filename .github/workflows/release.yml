@@ -22,17 +22,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build web app
-        run: npx ng build --configuration production
-
-      - name: Sync Capacitor
-        run: npx cap sync android
-
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
+
+      - name: Build web app
+        run: npx ng build --configuration production
+
+      - name: Sync Capacitor
+        run: npx cap sync android
 
       - name: Decode keystore
         run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > openradiation.keystore
@@ -40,7 +40,7 @@ jobs:
       - name: Build APK
         run: |
           cd android
-          ./gradlew assembleRelease \
+          ./gradlew --no-daemon assembleRelease \
             -PversCode=${{ github.run_number }} \
             -PversName="${{ github.ref_name }}" \
             -Pandroid.injected.signing.store.file="${{ github.workspace }}/openradiation.keystore" \
