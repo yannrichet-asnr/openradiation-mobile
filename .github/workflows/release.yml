@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - '*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version name for the release (e.g. 2.3.5)'
+        required: true
+        default: 'dev'
+
+env:
+  VERSION_NAME: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || 'dev' }}
 
 jobs:
   build-android:
@@ -34,35 +43,70 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync android
 
+      - name: Check signing secrets
+        id: signing
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret is not set – building unsigned APK"
+          fi
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
       - name: Decode keystore
+        if: steps.signing.outputs.available == 'true'
         run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > openradiation.keystore
 
-      - name: Build APK
+      - name: Build signed APK
+        if: steps.signing.outputs.available == 'true'
         run: |
           cd android
           ./gradlew --no-daemon assembleRelease \
             -PversCode=${{ github.run_number }} \
-            -PversName="${{ github.ref_name }}" \
+            -PversName="${{ env.VERSION_NAME }}" \
             -Pandroid.injected.signing.store.file="${{ github.workspace }}/openradiation.keystore" \
             -Pandroid.injected.signing.store.password="${{ secrets.OPENRADIATION_KEYSTORE_PW }}" \
             -Pandroid.injected.signing.key.alias="openradiation" \
             -Pandroid.injected.signing.key.password="${{ secrets.OPENRADIATION_KEYSTORE_PW }}"
 
+      - name: Build unsigned APK
+        if: steps.signing.outputs.available != 'true'
+        run: |
+          cd android
+          ./gradlew --no-daemon assembleDebug \
+            -PversCode=${{ github.run_number }} \
+            -PversName="${{ env.VERSION_NAME }}"
+
       - name: Rename APK
         run: |
-          mv android/app/build/outputs/apk/release/app-release.apk \
-             android/app/build/outputs/apk/release/openradiation-${{ github.ref_name }}.apk
+          APK=$(find android/app/build/outputs/apk -name '*.apk' | head -1)
+          mkdir -p android/app/build/outputs/apk/out
+          mv "$APK" "android/app/build/outputs/apk/out/openradiation-${{ env.VERSION_NAME }}.apk"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: android/app/build/outputs/apk/release/openradiation-*.apk
+          path: android/app/build/outputs/apk/out/openradiation-*.apk
 
   build-ios:
     name: Build iOS IPA
     runs-on: macos-latest
+    if: ${{ vars.SKIP_IOS != 'true' }}
     steps:
+      - name: Check signing secrets
+        id: ios-signing
+        run: |
+          if [ -z "$CERT_B64" ] || [ -z "$PROV_B64" ]; then
+            echo "::error::iOS signing secrets (IOS_CERTIFICATE_BASE64, IOS_PROVISIONING_PROFILE_BASE64) are not configured – skipping iOS build"
+            exit 1
+          fi
+        env:
+          CERT_B64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          PROV_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -122,7 +166,7 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -archivePath ${{ github.workspace }}/App.xcarchive \
-            MARKETING_VERSION="${{ github.ref_name }}" \
+            MARKETING_VERSION="${{ env.VERSION_NAME }}" \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             archive
 
@@ -134,7 +178,7 @@ jobs:
             -exportPath ${{ github.workspace }}/ios-output
 
       - name: Rename IPA
-        run: mv ios-output/App.ipa ios-output/openradiation-${{ github.ref_name }}.ipa
+        run: mv ios-output/App.ipa ios-output/openradiation-${{ env.VERSION_NAME }}.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
@@ -145,23 +189,19 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-android, build-ios]
+    if: always() && needs.build-android.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download Android APK
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: android-apk
           path: ./artifacts
-
-      - name: Download iOS IPA
-        uses: actions/download-artifact@v4
-        with:
-          name: ios-ipa
-          path: ./artifacts
+          merge-multiple: true
 
       - name: Create GitHub Release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ github.ref_name }}
